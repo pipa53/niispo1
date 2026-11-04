@@ -1,0 +1,21 @@
+# v4 — чистим кеши: rm apt lists, pip --no-cache-dir --no-deps. ~387 MB.
+# База всё ещё полный python:3.12.1 (не slim).
+FROM python:3.12.1
+
+# -- Медленные операции --
+# Установка системных зависимостей с удалением кэша apt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Установка зависимостей python без кэша pip
+RUN --mount=type=bind,source=requirements.txt,target=/app/requirements.txt \
+    pip install --no-cache-dir --no-deps -r /app/requirements.txt
+
+# -- Быстрые операции --
+COPY app.py /app/
+
+WORKDIR /app
+
+# 0.0.0.0 — слушать все интерфейсы контейнера, иначе порт с хоста не достучится
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0"]

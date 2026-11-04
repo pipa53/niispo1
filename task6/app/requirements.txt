@@ -1,0 +1,7 @@
+# Версии зафиксированы, чтобы сборка образа была воспроизводимой.
+fastapi==0.110.2
+uvicorn[standard]==0.29.0
+sqlalchemy==2.0.29
+psycopg2==2.9.9          # драйвер PostgreSQL (собирается в builder-стадии Dockerfile)
+pydantic==2.6.4
+redis==5.0.3             # кэш GET /report; без Redis приложение всё равно стартует

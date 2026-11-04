@@ -1,0 +1,78 @@
+# =============================================================================
+#  Задание 4 — Docker Compose: Nginx + FastAPI + PostgreSQL.
+#
+#  Проект: simple-python-app
+#  Точка входа с хоста: http://127.0.0.1:8080  (внутри Nginx слушает :80)
+#
+#  Сети:
+#    frontend-net  — web ↔ simple_python_app (публикуем порт наружу)
+#    backend-net   — simple_python_app ↔ db  (БД с хоста не видна)
+# =============================================================================
+name: simple-python-app
+
+services:
+  # ---------- Nginx: reverse-proxy, единственный опубликованный порт ----------
+  web:
+    image: nginx:alpine
+    ports:
+      # Хостовый 80 занят службой Windows IIS/HTTP — публикуем 8080 → 80.
+      - "8080:80"
+    networks:
+      - frontend-net
+    volumes:
+      # Конфиг прокси: имя upstream = имя сервиса simple_python_app (Docker DNS).
+      - type: bind
+        source: ./nginx/app.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+    depends_on:
+      - simple_python_app
+
+  # ---------- FastAPI-приложение (uvicorn внутри образа) ----------
+  simple_python_app:
+    image: simple_python_app:${APP_VERSION:-latest}
+    build: ./simple_python_app
+    environment:
+      # Хост БД — имя сервиса db, а не localhost: контейнеры в одной сети.
+      API_DB_HOST: db
+      API_DB_PASS: apipass
+      API_DB_NAME: api
+      API_DB_USER: apiuser
+    networks:
+      - frontend-net
+      - backend-net
+    depends_on:
+      db:
+        # Ждём не «запущен», а healthy: Postgres должен принять соединения.
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------- PostgreSQL ----------
+  db:
+    image: postgres:16.2-alpine
+    environment:
+      POSTGRES_PASSWORD: apipass
+      POSTGRES_DB: api
+      POSTGRES_USER: apiuser
+    volumes:
+      # Именованный volume: данные переживают docker compose down (без -v).
+      - dbdata:/var/lib/postgresql/data
+    networks:
+      - backend-net
+    healthcheck:
+      # Явные -U/-d: иначе pg_isready идёт как root → FATAL: role "root" does not exist.
+      test: ["CMD-SHELL", "pg_isready -U apiuser -d api"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+      start_interval: 1s
+
+# ---------- Сети ----------
+networks:
+  frontend-net:
+  backend-net:
+
+# ---------- Тома ----------
+volumes:
+  dbdata:

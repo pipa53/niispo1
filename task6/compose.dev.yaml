@@ -1,0 +1,55 @@
+# =============================================================================
+#  Dev: в контейнере только приложение (и одноразовый Liquibase).
+#  PostgreSQL, Redis, Nginx — системные службы хоста.
+#
+#  Перед первым запуском:
+#    1. Поднять postgres (БД ${POSTGRES_DB}, пользователь ${POSTGRES_USER}).
+#    2. Создать БД (если ещё нет): CREATE DATABASE api;
+#    3. Поднять redis на 127.0.0.1:6379 (конфиг deploy/redis/redis.conf).
+#    4. Поднять nginx с deploy/nginx/dev.conf (прокси на 127.0.0.1:8000).
+#
+#    make dev-up
+# =============================================================================
+name: library-dev
+
+services:
+  liquibase:
+    build: ./liquibase
+    extra_hosts:
+      # Linux: host-gateway → IP хоста, где слушает системный PostgreSQL.
+      - "host.docker.internal:host-gateway"
+    command:
+      # liquibase.properties в образе указывает на хост `db` (local-стек).
+      # Здесь URL переопределяем аргументами CLI на Postgres хоста.
+      - --url=jdbc:postgresql://host.docker.internal:5432/${POSTGRES_DB}
+      - --username=${POSTGRES_USER}
+      - --password=${POSTGRES_PASSWORD}
+      - --changeLogFile=changelog.xml
+      - update
+    restart: "no"
+
+  app:
+    build: ./app
+    image: library-app:dev
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Не сервисы `db`/`redis` из compose.yaml, а службы хоста.
+      API_DB_HOST: host.docker.internal
+      API_DB_PORT: "5432"
+      API_DB_NAME: ${POSTGRES_DB}
+      API_DB_USER: ${POSTGRES_USER}
+      API_DB_PASS: ${POSTGRES_PASSWORD}
+      API_REDIS_HOST: host.docker.internal
+      API_REDIS_PORT: "6379"
+    volumes:
+      # Правки исходников подхватываются uvicorn --reload без пересборки образа.
+      - ./app:/app
+    ports:
+      # Nginx на хосте (deploy/nginx/dev.conf) проксирует сюда 8080 → 8000.
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      liquibase:
+        condition: service_completed_successfully
+    command: ["main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    restart: unless-stopped

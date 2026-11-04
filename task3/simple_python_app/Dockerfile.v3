@@ -1,0 +1,23 @@
+# v3 — bind-mount requirements.txt на время RUN: файл не копируется в слой.
+# COPY только app.py (без venv из контекста). Размер ~427 MB.
+FROM python:3.12.1
+
+# -- Медленные операции --
+# Установка системных зависимостей (в т.ч. для сборки psycopg2)
+RUN apt-get update \
+    && apt-get install -y gcc libpq-dev
+
+# Установка зависимостей python
+# requirements.txt монтируется на время выполнения и НЕ попадает в финальный образ
+RUN --mount=type=bind,source=requirements.txt,target=/app/requirements.txt \
+    pip install -r /app/requirements.txt
+
+# -- Быстрые операции --
+# Копирование ТОЛЬКО кода приложения (без venv, __pycache__ и прочего)
+COPY app.py /app/
+
+# Установка рабочей директории
+WORKDIR /app
+
+# 0.0.0.0 — слушать все интерфейсы контейнера, иначе порт с хоста не достучится
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0"]

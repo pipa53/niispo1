@@ -1,0 +1,3 @@
+# Секреты стенда (пароли Postgres, ключи LiteLLM / Open WebUI).
+# Шаблон без секретов — .env.example.
+.env

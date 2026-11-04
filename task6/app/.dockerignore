@@ -1,0 +1,26 @@
+# Что не копировать в контекст сборки образа приложения.
+# Чем меньше контекст — тем быстрее docker build.
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# Git
+.git/
+.gitignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker: сам Dockerfile и этот файл в образ не нужны
+Dockerfile
+.dockerignore

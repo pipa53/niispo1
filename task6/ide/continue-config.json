@@ -1,0 +1,19 @@
+{
+  "_comment": "Continue.dev: чат — алиас local (16k), автодополнение — fast (8k). Ключ взять из LITELLM_MASTER_KEY в .env.",
+  "models": [
+    {
+      "title": "Local LLM (LiteLLM)",
+      "provider": "openai",
+      "model": "local",
+      "apiBase": "http://127.0.0.1:4000/v1",
+      "apiKey": "USE_LITELLM_MASTER_KEY_FROM_DOTENV"
+    }
+  ],
+  "tabAutocompleteModel": {
+    "title": "Local LLM autocomplete",
+    "provider": "openai",
+    "model": "fast",
+    "apiBase": "http://127.0.0.1:4000/v1",
+    "apiKey": "USE_LITELLM_MASTER_KEY_FROM_DOTENV"
+  }
+}

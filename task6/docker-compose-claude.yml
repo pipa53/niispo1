@@ -1,0 +1,60 @@
+# =============================================================================
+#  Claude Code CLI — локальная LLM через нативный Anthropic API Ollama
+#  (Ollama >= 0.14, у нас 0.34.x). LiteLLM остаётся роутером для Open WebUI
+#  и Aider; Claude Code говорит с Ollama напрямую в формате /v1/messages.
+#
+#    docker compose -f docker-compose-claude.yml up -d --build
+#    docker exec -it claude-code claude
+#
+#  Основной стек (compose.yaml) должен быть уже поднят: сеть library-llm_llm-net
+#  и контейнер ollama.
+# =============================================================================
+name: claude-code
+
+services:
+  claude:
+    build: ./claude
+    image: claude-code-cli:local
+    container_name: claude-code
+    # Не поднимаем после reboot сами: CLI нужен только когда с ним работают.
+    restart: "no"
+    stdin_open: true
+    tty: true
+    volumes:
+      # Код «Учёта читателей библиотеки» — рабочая директория агента (/workspace).
+      - ./app:/workspace
+    environment:
+      # Extended thinking локальная 7B-модель не умеет — иначе мусор в ответе.
+      MAX_THINKING_TOKENS: "0"
+      CLAUDE_CODE_DISABLE_THINKING: "1"
+      # Нативный Anthropic Messages API Ollama (не LiteLLM).
+      ANTHROPIC_BASE_URL: http://ollama:11434
+      # Ollama ключ не проверяет; Claude Code требует непустое значение.
+      ANTHROPIC_API_KEY: ollama
+      ANTHROPIC_AUTH_TOKEN: ollama
+      # Overlay из claude/Modelfile (mistral-nemo:12b, num_ctx=4096).
+      ANTHROPIC_MODEL: claude-local
+      # Haiku/Sonnet/Opus в CLI — те же веса: второй модели в VRAM нет.
+      ANTHROPIC_SMALL_FAST_MODEL: claude-local
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-local
+      ANTHROPIC_DEFAULT_SONNET_MODEL: claude-local
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-local
+      # Стенд без интернета для CLI: не стучимся в api.anthropic.com.
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_MODEL_CALLS: "1"
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1"
+      DISABLE_AUTOUPDATER: "1"
+      DISABLE_TELEMETRY: "1"
+      DISABLE_ERROR_REPORTING: "1"
+      DISABLE_BUG_COMMAND: "1"
+      # Должно совпадать с PARAMETER num_ctx в Modelfile.
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "4096"
+    networks:
+      - llm-net
+
+networks:
+  # Создаётся основным стеком (name: library-llm → сеть library-llm_llm-net).
+  llm-net:
+    external: true
+    name: library-llm_llm-net

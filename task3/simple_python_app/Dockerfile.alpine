@@ -1,0 +1,31 @@
+# Alpine-вариант v5: musl + apk вместо glibc/apt. Самый маленький: ~29 MB.
+FROM python:3.12.1-alpine AS builder
+
+# -- Медленные операции --
+# Установка системных зависимостей (в т.ч. для сборки psycopg2)
+RUN apk update \
+    && apk add --no-cache gcc musl-dev postgresql-dev
+
+# Установка зависимостей python в директорию /app/wheels
+RUN --mount=type=bind,source=requirements.txt,target=/app/requirements.txt \
+    pip wheel --no-cache-dir --no-deps -r /app/requirements.txt --wheel-dir /app/wheels
+
+# ============ Финальный образ ============
+FROM python:3.12.1-alpine
+
+# Копируем колёса из builder
+COPY --from=builder /app/wheels /wheels
+
+# Рантайм-зависимость (libpq без dev-заголовков)
+RUN apk add --no-cache libpq
+
+# Ставим python-пакеты
+RUN pip install --no-cache --no-cache-dir /wheels/*
+
+# Код приложения
+COPY app.py /app/
+
+WORKDIR /app
+
+# 0.0.0.0 — слушать все интерфейсы контейнера, иначе порт с хоста не достучится
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0"]

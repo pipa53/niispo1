@@ -1,0 +1,252 @@
+# =============================================================================
+#  task6 — локальное окружение: «Учёт читателей библиотеки» + LLM-стек.
+#
+#  Часть 1 (из задания 5): db, liquibase, redis, app, web.
+#  Часть 2 (задание 6, п.9): ollama, litellm, searxng, openwebui.
+#  Часть 3 (профиль tools): aider — агент в IDE/терминале.
+#
+#  Claude Code CLI поднимается отдельно: docker-compose-claude.yml
+#
+#  Сети:
+#    frontend-net   web ↔ app
+#    backend-net    app ↔ db ↔ redis ↔ liquibase
+#    llm-net        ollama ↔ litellm ↔ openwebui ↔ searxng ↔ aider
+#    egress         сервисы, которым нужен интернет
+# =============================================================================
+name: library-llm
+
+services:
+
+  # POSTGRES_DB=api создаётся образом. БД litellm — init-db/*.sql, только
+  # при пустом volume. llm-net нужен, чтобы LiteLLM ходил в Postgres по имени db.
+  db:
+    image: postgres:16.2-alpine
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend-net
+      - llm-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Кэш GET /report. Порт наружу не публикуем — только backend-net.
+  redis:
+    image: redis:7.2-alpine
+    container_name: library-redis
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    networks:
+      - backend-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Один прогон миграций и exit 0. app ждёт service_completed_successfully.
+  liquibase:
+    build: ./liquibase
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend-net
+    command: --defaults-file=/liquibase/changelog/liquibase.properties update
+    restart: "no"
+
+  app:
+    build: ./app
+    image: library-app:latest
+    environment:
+      API_DB_HOST: db
+      API_DB_PORT: "5432"
+      API_DB_NAME: ${POSTGRES_DB}
+      API_DB_USER: ${POSTGRES_USER}
+      API_DB_PASS: ${POSTGRES_PASSWORD}
+      API_REDIS_HOST: redis
+      API_REDIS_PORT: "6379"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      liquibase:
+        condition: service_completed_successfully
+    networks:
+      - frontend-net
+      - backend-net
+    restart: unless-stopped
+
+  # С хоста API доступен как http://127.0.0.1:8080 (не напрямую uvicorn :8000).
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    networks:
+      - frontend-net
+    volumes:
+      - type: bind
+        source: ./nginx/app.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  # Инференс локальных моделей. Веса живут в volume ollama-data — `make down`
+  # его не удаляет. Claude Code ходит сюда напрямую (Anthropic /v1/messages);
+  # Open WebUI и Aider — через LiteLLM.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      # Держим модель в VRAM 30 минут после последнего запроса (RTX 4070 Laptop, 8 ГБ).
+      OLLAMA_KEEP_ALIVE: "30m"
+      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      # Flash Attention экономит память на длинном контексте (claude-local 16k).
+      OLLAMA_FLASH_ATTENTION: "1"
+    ports:
+      # Только localhost: с хоста можно `ollama list`, снаружи машины — нельзя.
+      - "127.0.0.1:11434:11434"
+    networks:
+      - llm-net
+      - egress
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # OpenAI-совместимый роутер: алиасы local/smart/fast → ollama_chat/qwen2.5-coder:7b.
+  # Клиенты: Open WebUI, Aider, Continue.dev. Claude Code LiteLLM не использует.
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: litellm
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      LITELLM_DATABASE_URL: ${LITELLM_DATABASE_URL}
+      STORE_MODEL_IN_DB: "True"
+    ports:
+      - "127.0.0.1:4000:4000"
+    networks:
+      - llm-net
+      - egress
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=3).status == 200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # Метапоиск для кнопки Web Search в Open WebUI (см. searxng/settings.yml).
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8085:8080"
+    volumes:
+      - ./searxng:/etc/searxng:ro
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8085
+    networks:
+      - llm-net
+      - egress
+
+  # Чат в браузере. Ollama API выключен: все модели идут через LiteLLM,
+  # чтобы алиасы и ключ были одни и те же, что у Aider/Continue.
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openwebui
+    restart: unless-stopped
+    depends_on:
+      litellm:
+        condition: service_healthy
+      searxng:
+        condition: service_started
+    volumes:
+      - openwebui-data:/app/backend/data
+    environment:
+      ENABLE_OLLAMA_API: "false"
+      OPENAI_API_BASE_URL: http://litellm:4000/v1
+      OPENAI_API_KEY: ${LITELLM_MASTER_KEY}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      ENABLE_SIGNUP: "false"
+      ENABLE_WEB_SEARCH: "True"
+      WEB_SEARCH_ENGINE: searxng
+      SEARXNG_QUERY_URL: http://searxng:8080/search?q=<query>
+    ports:
+      - "127.0.0.1:3000:8080"
+    networks:
+      - llm-net
+      - egress
+
+  # Агент для редактирования кода в терминале (как подключение LLM к «среде разработки»).
+  # Профиль tools: не стартует с `make up`, только `make aider`.
+  aider:
+    image: paulgauthier/aider:latest
+    container_name: aider
+    restart: "no"
+    stdin_open: true
+    tty: true
+    working_dir: /app
+    volumes:
+      - ./app:/app
+    environment:
+      # Префикс openai/ обязателен для Aider: провайдер OpenAI-совместимый.
+      OPENAI_API_BASE: http://litellm:4000/v1
+      OPENAI_API_KEY: ${LITELLM_MASTER_KEY}
+      AIDER_MODEL: openai/local
+    networks:
+      - llm-net
+    profiles:
+      - tools
+
+networks:
+  # web ↔ app. Не internal: иначе Docker не публикует порт 8080 на хост.
+  frontend-net:
+  backend-net:
+    internal: true
+  # ollama ↔ litellm ↔ openwebui ↔ searxng. Internal: с хоста в эту сеть
+  # не попасть, кроме опубликованных портов. Claude Code подключается к
+  # той же сети как external (docker-compose-claude.yml).
+  llm-net:
+    internal: true
+  # Исходящий интернет (SearXNG, Open WebUI).
+  egress:
+
+volumes:
+  dbdata:          # PostgreSQL (api + litellm)
+  ollama-data:     # веса моделей, десятки ГБ — не удалять
+  openwebui-data:  # чаты/настройки Open WebUI

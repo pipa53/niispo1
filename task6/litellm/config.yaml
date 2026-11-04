@@ -1,0 +1,95 @@
+# =============================================================================
+#  Конфигурация LiteLLM — маршрутизатора запросов к LLM.
+#
+#  LiteLLM решает три задачи:
+#    1. Даёт единый OpenAI-совместимый API (/v1/chat/completions) поверх
+#       Ollama. Им пользуются Open WebUI, Aider и Continue.dev.
+#       Claude Code CLI к LiteLLM НЕ ходит: ему нужен нативный Anthropic
+#       /v1/messages, который отдаёт сам Ollama (см. docker-compose-claude.yml).
+#    2. Позволяет выдавать клиентам виртуальные ключи с ограничениями
+#       (лимит расходов, RPM, доступные модели).
+#    3. Сохраняет историю запросов и расходов в БД (Postgres, база litellm).
+#
+#  Алиасы моделей (model_name) — это имена, которые видят клиенты.
+#  Внутри LiteLLM маппит их на конкретные провайдеры/модели. Смена модели
+#  не требует правок в клиентах — достаточно поменять этот файл.
+# =============================================================================
+
+model_list:
+  # ---- Локальная модель на Ollama (единственный провайдер) ----------------
+  #
+  #  Клиенты обращаются к модели по имени `local`, а LiteLLM отправляет
+  #  запрос в контейнер ollama по внутренней сети (host `ollama` резолвится
+  #  Docker DNS внутри сети llm-net).
+  #  Провайдер ollama_chat/ (не ollama/): chat-completions, не /api/generate.
+  - model_name: local
+    litellm_params:
+      model: ollama_chat/mistral-nemo:12b
+      api_base: http://ollama:11434
+      # Ollama не требует настоящего ключа, но LiteLLM требует, чтобы поле
+      # было непустым. Подставляем заглушку.
+      api_key: "ollama"
+      num_ctx: 4096
+
+  # ---- Алиас `smart` — та же модель, но с другими параметрами -------------
+  #
+  #  Пример гибкости LiteLLM: одно и то же физическое LLM можно выставлять
+  #  под разными именами с разными настройками. Здесь — синоним `local`
+  #  для наглядности в интерфейсах.
+  - model_name: smart
+    litellm_params:
+      model: ollama_chat/mistral-nemo:12b
+      api_base: http://ollama:11434
+      api_key: "ollama"
+      num_ctx: 4096
+
+  # ---- Алиас `fast` — та же модель, но с меньшим контекстом (быстрее) ----
+  #
+  #  `num_ctx` — размер контекстного окна. Меньше → быстрее и меньше VRAM.
+  #  Для автодополнения в Continue.dev (tabAutocompleteModel: fast).
+  - model_name: fast
+    litellm_params:
+      model: ollama_chat/mistral-nemo:12b
+      api_base: http://ollama:11434
+      api_key: "ollama"
+      num_ctx: 4096
+
+# =============================================================================
+#  Общие настройки LiteLLM.
+# =============================================================================
+general_settings:
+  # Ключ для админских операций (создание ключей, просмотр расходов).
+  # Берётся из .env.
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+  # Ключ для шифрования виртуальных ключей в БД.
+  # После первого старта менять нельзя — иначе старые ключи станут нечитаемы.
+  salt_key: os.environ/LITELLM_SALT_KEY
+
+  # Подключение к БД — та же Postgres, но отдельная база `litellm`.
+  # Контейнер `db` доступен по имени внутри общей сети.
+  database_url: os.environ/LITELLM_DATABASE_URL
+
+  # При старте LiteLLM сам применит необходимые миграции к БД `litellm`
+  # (создаст свои таблицы). Это удобно — не нужно делать отдельный шаг.
+  store_model_in_db: true
+
+litellm_settings:
+  # Отключаем телеметрию — не отправляем ничего наружу.
+  telemetry: false
+
+  # drop_params: true — LiteLLM выкидывает из запроса параметры, которые
+  # целевая модель не поддерживает (например, temperature для моделей без него).
+  drop_params: true
+
+  # additional_drop_params — принудительно выкидываем эти поля из запроса,
+  # даже если LiteLLM думает, что они «поддерживаются».
+  #
+  # Клиенты вроде Claude Code v2 могут прислать extended thinking
+  # (поля thinking / thinking_budget / reasoning_effort). Локальный
+  # qwen2.5-coder:7b их не поддерживает — Ollama отвечает 400. Срезаем до отправки.
+  additional_drop_params: ["thinking", "thinking_budget", "reasoning_effort"]
+
+  # Автоматические ретраи при ошибках сети.
+  num_retries: 2
+  request_timeout: 600
